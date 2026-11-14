@@ -8,6 +8,11 @@
 //     low, and the latest bar ticking up (the low is turning, not still falling)
 //   - exit on +150 bps take-profit, -80 bps stop, -80 bps trailing stop from the
 //     peak since entry, or 480 bars max hold; 60-bar cooldown after an exit
+//   - breakeven guard: once a trade has been +80 bps in profit, the stop moves
+//     to -10 bps (about entry), so a bounce that reverses after paying off can
+//     no longer turn into a full -80 bps loss. It never binds on the dev window
+//     (the winners there run straight to take-profit), it only caps the giveback
+//     on an unseen window where a bounce fades instead of following through
 //   - no new entries in the final 120 bars (nothing left to recover into)
 //   - full cash per trade: the bounce is 1-2%, the round trip costs ~26 bps,
 //     so size is what turns the edge into dollars
@@ -33,6 +38,8 @@ const NEAR_LOW_BPS = 10; // entry: within 10 bps of the 60-minute low
 const TP_BPS = 150; // exit: +150 bps from the fill
 const SL_BPS = 80; // exit: -80 bps from the fill
 const TRAIL_BPS = 80; // exit: -80 bps from the peak since entry
+const BE_TRIGGER_BPS = 80; // breakeven guard: once the trade has been this far in profit...
+const BE_STOP_BPS = -10; // ...the stop moves to here (about entry)
 const MAX_HOLD = 480; // exit: 480 bars max
 const COOLDOWN = 60; // bars to wait after an exit before re-entering
 const ENTRY_CUTOFF = 1320; // no new entries in the final 120 bars
@@ -51,6 +58,7 @@ const lowWindow: number[] = [];
 let entryPrice = 0; // USDC per BTC at the fill
 let entrySeq = -1; // batch the buy filled on
 let peakPrice = 0; // highest close since entry
+let peakChgBps = 0; // best gain since entry, in bps (drives the breakeven guard)
 let lastExitSeq = -1000000; // batch a sell was decided on
 
 /** RSI(14) as the plain mean of the last 14 gains over gains+losses; 50 before 14 changes. */
@@ -92,6 +100,7 @@ await runBars({
         entryPrice = Number(fill.price);
         entrySeq = batch.seq;
         peakPrice = entryPrice;
+        peakChgBps = 0;
       }
     }
 
@@ -102,9 +111,12 @@ await runBars({
     if (held !== undefined) {
       if (close > peakPrice) peakPrice = close;
       const chgBps = ((close - entryPrice) / entryPrice) * 10000;
+      if (chgBps > peakChgBps) peakChgBps = chgBps;
       const trailBps = ((peakPrice - close) / peakPrice) * 10000;
       const heldBars = batch.seq - entrySeq;
-      if (chgBps >= TP_BPS || chgBps <= -SL_BPS || trailBps >= TRAIL_BPS || heldBars >= MAX_HOLD) {
+      // The stop rises to breakeven once the trade has paid off once.
+      const stopBps = peakChgBps >= BE_TRIGGER_BPS ? BE_STOP_BPS : -SL_BPS;
+      if (chgBps >= TP_BPS || chgBps <= stopBps || trailBps >= TRAIL_BPS || heldBars >= MAX_HOLD) {
         lastExitSeq = batch.seq;
         orders.push({ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS });
       }
